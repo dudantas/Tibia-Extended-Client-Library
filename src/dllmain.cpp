@@ -289,24 +289,12 @@ typedef DWORD (WINAPI *_GetTempPathA)(DWORD nBufferLength, LPSTR lpBuffer);
 typedef UINT (WINAPI *_GetTempFileNameA)(LPCSTR lpPathName, LPCSTR lpPrefixString, UINT uUnique, LPSTR lpTempFileName);
 typedef DWORD (WINAPI *_GetTempPathW)(DWORD nBufferLength, LPWSTR lpBuffer);
 typedef UINT (WINAPI *_GetTempFileNameW)(LPCWSTR lpPathName, LPCWSTR lpPrefixString, UINT uUnique, LPWSTR lpTempFileName);
-typedef HANDLE (WINAPI *_CreateFileA)(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
-typedef HANDLE (WINAPI *_CreateFileW)(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
-typedef BOOL (WINAPI *_DeleteFileA)(LPCSTR lpFileName);
-typedef BOOL (WINAPI *_DeleteFileW)(LPCWSTR lpFileName);
-typedef DWORD (WINAPI *_GetFileAttributesA)(LPCSTR lpFileName);
-typedef DWORD (WINAPI *_GetFileAttributesW)(LPCWSTR lpFileName);
 static _Connect OriginalConnect;
 static _WSAConnect OriginalWSAConnect;
 static _GetTempPathA OriginalGetTempPathA;
 static _GetTempFileNameA OriginalGetTempFileNameA;
 static _GetTempPathW OriginalGetTempPathW;
 static _GetTempFileNameW OriginalGetTempFileNameW;
-static _CreateFileA OriginalCreateFileA;
-static _CreateFileW OriginalCreateFileW;
-static _DeleteFileA OriginalDeleteFileA;
-static _DeleteFileW OriginalDeleteFileW;
-static _GetFileAttributesA OriginalGetFileAttributesA;
-static _GetFileAttributesW OriginalGetFileAttributesW;
 static DWORD network_redirect_ipv4;
 static const unsigned short default_tibia_login_port = 7171;
 
@@ -448,112 +436,6 @@ static UINT WINAPI RedirectGetTempFileNameW(LPCWSTR lpPathName, LPCWSTR lpPrefix
 		return OriginalGetTempFileNameW(tempPath, lpPrefixString, uUnique, lpTempFileName);
 
 	return OriginalGetTempFileNameW ? OriginalGetTempFileNameW(lpPathName, lpPrefixString, uUnique, lpTempFileName) : 0;
-}
-
-static const char* FindBaseNameA(const char* path)
-{
-	if(!path)
-		return NULL;
-
-	const char* slash = strrchr(path, '\\');
-	const char* forwardSlash = strrchr(path, '/');
-	if(forwardSlash && (!slash || forwardSlash > slash))
-		slash = forwardSlash;
-
-	return slash ? slash + 1 : path;
-}
-
-static bool IsTibiaErrorReportPathA(const char* path)
-{
-	const char* baseName = FindBaseNameA(path);
-	return baseName && stricmp(baseName, "Error.txt") == 0;
-}
-
-static bool IsTibiaErrorReportPathW(LPCWSTR path)
-{
-	if(!path)
-		return false;
-
-	char narrowPath[MAX_PATH] = {};
-	if(WideCharToMultiByte(CP_ACP, 0, path, -1, narrowPath, sizeof(narrowPath), NULL, NULL) <= 0)
-		return false;
-
-	return IsTibiaErrorReportPathA(narrowPath);
-}
-
-static bool BuildRedirectedErrorReportPathA(char* buffer, size_t bufferSize)
-{
-	if(!should_isolate_client_state || client_state_directory[0] == '\0')
-		return false;
-
-	snprintf(buffer, bufferSize, "%s\\Error.txt", client_state_directory);
-	return true;
-}
-
-static bool BuildRedirectedErrorReportPathW(wchar_t* buffer, size_t bufferSize)
-{
-	char narrowPath[MAX_PATH] = {};
-	if(!BuildRedirectedErrorReportPathA(narrowPath, sizeof(narrowPath)))
-		return false;
-
-	return MultiByteToWideChar(CP_ACP, 0, narrowPath, -1, buffer, static_cast<int>(bufferSize)) > 0;
-}
-
-static HANDLE WINAPI RedirectCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
-{
-	char redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathA(lpFileName) && BuildRedirectedErrorReportPathA(redirectedPath, sizeof(redirectedPath)) && OriginalCreateFileA)
-	{
-		AppendClientLog("redirect error report file %s -> %s", lpFileName ? lpFileName : "(null)", redirectedPath);
-		return OriginalCreateFileA(redirectedPath, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-	}
-
-	return OriginalCreateFileA ? OriginalCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) : INVALID_HANDLE_VALUE;
-}
-
-static HANDLE WINAPI RedirectCreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
-{
-	wchar_t redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathW(lpFileName) && BuildRedirectedErrorReportPathW(redirectedPath, MAX_PATH) && OriginalCreateFileW)
-		return OriginalCreateFileW(redirectedPath, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-
-	return OriginalCreateFileW ? OriginalCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) : INVALID_HANDLE_VALUE;
-}
-
-static BOOL WINAPI RedirectDeleteFileA(LPCSTR lpFileName)
-{
-	char redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathA(lpFileName) && BuildRedirectedErrorReportPathA(redirectedPath, sizeof(redirectedPath)) && OriginalDeleteFileA)
-		return OriginalDeleteFileA(redirectedPath);
-
-	return OriginalDeleteFileA ? OriginalDeleteFileA(lpFileName) : FALSE;
-}
-
-static BOOL WINAPI RedirectDeleteFileW(LPCWSTR lpFileName)
-{
-	wchar_t redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathW(lpFileName) && BuildRedirectedErrorReportPathW(redirectedPath, MAX_PATH) && OriginalDeleteFileW)
-		return OriginalDeleteFileW(redirectedPath);
-
-	return OriginalDeleteFileW ? OriginalDeleteFileW(lpFileName) : FALSE;
-}
-
-static DWORD WINAPI RedirectGetFileAttributesA(LPCSTR lpFileName)
-{
-	char redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathA(lpFileName) && BuildRedirectedErrorReportPathA(redirectedPath, sizeof(redirectedPath)) && OriginalGetFileAttributesA)
-		return OriginalGetFileAttributesA(redirectedPath);
-
-	return OriginalGetFileAttributesA ? OriginalGetFileAttributesA(lpFileName) : INVALID_FILE_ATTRIBUTES;
-}
-
-static DWORD WINAPI RedirectGetFileAttributesW(LPCWSTR lpFileName)
-{
-	wchar_t redirectedPath[MAX_PATH] = {};
-	if(IsTibiaErrorReportPathW(lpFileName) && BuildRedirectedErrorReportPathW(redirectedPath, MAX_PATH) && OriginalGetFileAttributesW)
-		return OriginalGetFileAttributesW(redirectedPath);
-
-	return OriginalGetFileAttributesW ? OriginalGetFileAttributesW(lpFileName) : INVALID_FILE_ATTRIBUTES;
 }
 
 static unsigned short HostToNetworkPort(unsigned short port)
@@ -847,24 +729,6 @@ static void PatchClientStateIsolation()
 		hooked = true;
 
 	if(HookKernelFunction("GetTempFileNameW", reinterpret_cast<void*>(&RedirectGetTempFileNameW), reinterpret_cast<void**>(&OriginalGetTempFileNameW)))
-		hooked = true;
-
-	if(HookKernelFunction("CreateFileA", reinterpret_cast<void*>(&RedirectCreateFileA), reinterpret_cast<void**>(&OriginalCreateFileA)))
-		hooked = true;
-
-	if(HookKernelFunction("CreateFileW", reinterpret_cast<void*>(&RedirectCreateFileW), reinterpret_cast<void**>(&OriginalCreateFileW)))
-		hooked = true;
-
-	if(HookKernelFunction("DeleteFileA", reinterpret_cast<void*>(&RedirectDeleteFileA), reinterpret_cast<void**>(&OriginalDeleteFileA)))
-		hooked = true;
-
-	if(HookKernelFunction("DeleteFileW", reinterpret_cast<void*>(&RedirectDeleteFileW), reinterpret_cast<void**>(&OriginalDeleteFileW)))
-		hooked = true;
-
-	if(HookKernelFunction("GetFileAttributesA", reinterpret_cast<void*>(&RedirectGetFileAttributesA), reinterpret_cast<void**>(&OriginalGetFileAttributesA)))
-		hooked = true;
-
-	if(HookKernelFunction("GetFileAttributesW", reinterpret_cast<void*>(&RedirectGetFileAttributesW), reinterpret_cast<void**>(&OriginalGetFileAttributesW)))
 		hooked = true;
 
 	AppendClientLog(
