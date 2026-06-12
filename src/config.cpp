@@ -12,7 +12,7 @@ extern bool should_use_cached_sprites;
 extern bool should_draw_manabar;
 extern bool should_redirect_network;
 extern char network_redirect_host[256];
-extern unsigned short network_redirect_port;
+extern unsigned short network_redirect_login_port;
 
 bool checkBool(char *buffer)
 {
@@ -43,7 +43,7 @@ void loadConfig()
 	should_draw_manabar = true;
 	should_redirect_network = false;
 	network_redirect_host[0] = '\0';
-	network_redirect_port = 0;
+	network_redirect_login_port = 0;
 
 	FILE* f = fopen("config.ini", "rb");
 	if(!f)
@@ -90,7 +90,7 @@ void loadConfig()
 				{
 					int port = atoi(value);
 					if(port > 0 && port <= 65535)
-						network_redirect_port = (unsigned short)port;
+						network_redirect_login_port = (unsigned short)port;
 				}
 			}
 		}

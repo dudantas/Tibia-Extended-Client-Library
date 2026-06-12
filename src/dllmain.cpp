@@ -1,4 +1,5 @@
 #include <winsock2.h>
+#include <stdarg.h>
 #include "config.h"
 #include "extdx9.h"
 #include "extogl.h"
@@ -36,7 +37,7 @@ bool should_use_cached_sprites;
 bool should_draw_manabar;
 bool should_redirect_network;
 char network_redirect_host[256];
-unsigned short network_redirect_port;
+unsigned short network_redirect_login_port;
 #endif
 
 ExtendedEngine* transEngine;
@@ -66,10 +67,36 @@ BYTE SpriteContextNeg;
 typedef int (WSAAPI *_Connect)(SOCKET s, const sockaddr* name, int namelen);
 static _Connect OriginalConnect;
 static DWORD network_redirect_ipv4;
+static bool network_redirect_login_connected;
 
 static unsigned short HostToNetworkPort(unsigned short port)
 {
 	return (unsigned short)((port << 8) | (port >> 8));
+}
+
+static unsigned short NetworkToHostPort(unsigned short port)
+{
+	return HostToNetworkPort(port);
+}
+
+static void FormatIpv4(DWORD address, char* buffer, size_t bufferSize)
+{
+	const unsigned char* parts = reinterpret_cast<const unsigned char*>(&address);
+	snprintf(buffer, bufferSize, "%u.%u.%u.%u", parts[0], parts[1], parts[2], parts[3]);
+}
+
+static void AppendNetworkLog(const char* format, ...)
+{
+	FILE* file = fopen("extended-client.log", "ab");
+	if(!file)
+		return;
+
+	va_list args;
+	va_start(args, format);
+	vfprintf(file, format, args);
+	va_end(args);
+	fprintf(file, "\r\n");
+	fclose(file);
 }
 
 static bool ParseRedirectHost(const char* host, DWORD* address)
@@ -102,12 +129,33 @@ static int WSAAPI RedirectConnect(SOCKET s, const sockaddr* name, int namelen)
 {
 	if(should_redirect_network && network_redirect_ipv4 != 0 && name && namelen >= (int)sizeof(sockaddr_in) && name->sa_family == AF_INET)
 	{
+		const sockaddr_in* original = reinterpret_cast<const sockaddr_in*>(name);
 		sockaddr_in redirected = *reinterpret_cast<const sockaddr_in*>(name);
 		redirected.sin_addr.s_addr = network_redirect_ipv4;
-		if(network_redirect_port != 0)
-			redirected.sin_port = HostToNetworkPort(network_redirect_port);
 
-		return OriginalConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected));
+		const bool overrideLoginPort = network_redirect_login_port != 0 && !network_redirect_login_connected;
+		if(overrideLoginPort)
+			redirected.sin_port = HostToNetworkPort(network_redirect_login_port);
+
+		int result = OriginalConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected));
+		const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+		if(overrideLoginPort && (result == 0 || error == WSAEWOULDBLOCK || error == WSAEINPROGRESS))
+			network_redirect_login_connected = true;
+
+		char originalHost[32] = {};
+		char redirectedHost[32] = {};
+		FormatIpv4(original->sin_addr.s_addr, originalHost, sizeof(originalHost));
+		FormatIpv4(redirected.sin_addr.s_addr, redirectedHost, sizeof(redirectedHost));
+		AppendNetworkLog(
+			"connect original=%s:%u redirected=%s:%u loginPortOverride=%s result=%d error=%d",
+			originalHost,
+			NetworkToHostPort(original->sin_port),
+			redirectedHost,
+			NetworkToHostPort(redirected.sin_port),
+			overrideLoginPort ? "true" : "false",
+			result,
+			error);
+		return result;
 	}
 
 	return OriginalConnect(s, name, namelen);
@@ -175,7 +223,17 @@ static void PatchNetworkRedirect()
 		return;
 	}
 
-	HookImportedFunction("ws2_32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect));
+	if(HookImportedFunction("ws2_32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)) ||
+		HookImportedFunction("wsock32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)))
+	{
+		char redirectHost[32] = {};
+		FormatIpv4(network_redirect_ipv4, redirectHost, sizeof(redirectHost));
+		AppendNetworkLog("network redirect enabled host=%s loginPort=%u", redirectHost, network_redirect_login_port);
+	}
+	else
+	{
+		AppendNetworkLog("network redirect failed to hook connect import");
+	}
 }
 #endif
 
