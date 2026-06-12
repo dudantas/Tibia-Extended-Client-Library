@@ -1,3 +1,4 @@
+#include <winsock2.h>
 #include "config.h"
 #include "extdx9.h"
 #include "extogl.h"
@@ -33,6 +34,9 @@ bool should_use_extended;
 bool should_use_alpha;
 bool should_use_cached_sprites;
 bool should_draw_manabar;
+bool should_redirect_network;
+char network_redirect_host[256];
+unsigned short network_redirect_port;
 #endif
 
 ExtendedEngine* transEngine;
@@ -57,6 +61,123 @@ DWORD DeleteDX7Context;
 DWORD SpriteContext;
 BYTE SpriteContextPos;
 BYTE SpriteContextNeg;
+
+#ifdef __CONFIG__
+typedef int (WSAAPI *_Connect)(SOCKET s, const sockaddr* name, int namelen);
+static _Connect OriginalConnect;
+static DWORD network_redirect_ipv4;
+
+static unsigned short HostToNetworkPort(unsigned short port)
+{
+	return (unsigned short)((port << 8) | (port >> 8));
+}
+
+static bool ParseRedirectHost(const char* host, DWORD* address)
+{
+	if(!host || !address)
+		return false;
+
+	if(stricmp(host, "localhost") == 0)
+	{
+		*address = 0x0100007F;
+		return true;
+	}
+
+	unsigned int parts[4] = {};
+	char tail = 0;
+	if(sscanf(host, "%u.%u.%u.%u%c", &parts[0], &parts[1], &parts[2], &parts[3], &tail) != 4)
+		return false;
+
+	for(int i = 0; i < 4; i++)
+	{
+		if(parts[i] > 255)
+			return false;
+	}
+
+	*address = parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+	return true;
+}
+
+static int WSAAPI RedirectConnect(SOCKET s, const sockaddr* name, int namelen)
+{
+	if(should_redirect_network && network_redirect_ipv4 != 0 && name && namelen >= (int)sizeof(sockaddr_in) && name->sa_family == AF_INET)
+	{
+		sockaddr_in redirected = *reinterpret_cast<const sockaddr_in*>(name);
+		redirected.sin_addr.s_addr = network_redirect_ipv4;
+		if(network_redirect_port != 0)
+			redirected.sin_port = HostToNetworkPort(network_redirect_port);
+
+		return OriginalConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected));
+	}
+
+	return OriginalConnect(s, name, namelen);
+}
+
+static bool HookImportedFunction(const char* moduleName, const char* functionName, void* replacement, void** original)
+{
+	const auto dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(client_BaseAddr);
+	if(dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+		return false;
+
+	const auto ntHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(client_BaseAddr + dosHeader->e_lfanew);
+	if(ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+		return false;
+
+	const auto importDirectory = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	if(importDirectory.VirtualAddress == 0)
+		return false;
+
+	auto importDescriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(client_BaseAddr + importDirectory.VirtualAddress);
+	for(; importDescriptor->Name != 0; importDescriptor++)
+	{
+		const char* importedModuleName = reinterpret_cast<const char*>(client_BaseAddr + importDescriptor->Name);
+		if(stricmp(importedModuleName, moduleName) != 0)
+			continue;
+
+		auto originalThunk = reinterpret_cast<PIMAGE_THUNK_DATA>(client_BaseAddr + importDescriptor->OriginalFirstThunk);
+		auto thunk = reinterpret_cast<PIMAGE_THUNK_DATA>(client_BaseAddr + importDescriptor->FirstThunk);
+		if(importDescriptor->OriginalFirstThunk == 0)
+			originalThunk = thunk;
+
+		for(; originalThunk->u1.AddressOfData != 0; originalThunk++, thunk++)
+		{
+			if(originalThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG)
+				continue;
+
+			const auto importByName = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(client_BaseAddr + originalThunk->u1.AddressOfData);
+			if(strcmp(reinterpret_cast<const char*>(importByName->Name), functionName) != 0)
+				continue;
+
+			DWORD oldProtect = 0;
+			DWORD newProtect = 0;
+			if(!VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), PAGE_EXECUTE_READWRITE, &oldProtect))
+				return false;
+
+			*original = reinterpret_cast<void*>(thunk->u1.Function);
+			thunk->u1.Function = reinterpret_cast<ULONG_PTR>(replacement);
+			VirtualProtect(&thunk->u1.Function, sizeof(thunk->u1.Function), oldProtect, &newProtect);
+			FlushInstructionCache(GetCurrentProcess(), &thunk->u1.Function, sizeof(thunk->u1.Function));
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void PatchNetworkRedirect()
+{
+	if(!should_redirect_network || network_redirect_host[0] == '\0')
+		return;
+
+	if(!ParseRedirectHost(network_redirect_host, &network_redirect_ipv4))
+	{
+		MessageBox(NULL, "config.ini loginHost must be an IPv4 address or localhost.", PROJECT_NAME, MB_OK|MB_ICONERROR);
+		return;
+	}
+
+	HookImportedFunction("ws2_32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect));
+}
+#endif
 
 _GetEngineAddr GetEngineAddr;
 _DrawSkin DrawSkin;
@@ -426,6 +547,10 @@ static HRESULT WINAPI Init( bool extended, bool transparent)
 		client_Version = 1100;
 	else
 		client_Version = 0;
+
+	#ifdef __CONFIG__
+	PatchNetworkRedirect();
+	#endif
 
 	switch(client_Version)
 	{

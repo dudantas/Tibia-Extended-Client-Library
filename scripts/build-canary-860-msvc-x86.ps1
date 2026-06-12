@@ -158,6 +158,7 @@ $compilerArgs += @(
     "/IMPLIB:$(Join-Path $OutDir "ddraw.lib")",
     "/DEF:$defPath",
     "user32.lib",
+    "ws2_32.lib",
     "opengl32.lib",
     "d3d9.lib"
 )

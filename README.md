@@ -82,3 +82,22 @@ use the extended .spr and .dat files(only if not defined **-D__CONFIG__**)\
 use the alpha channel in .spr file(only if not defined **-D__CONFIG__**)\
 **-D__MANABAR__**\
 force the manabar to be visible(only if not defined **-D__CONFIG__**)
+
+## config.ini
+
+When the DLL is built with `__CONFIG__`, it reads `config.ini` from the client directory. Existing options are still supported, and spacing around `=` is optional:
+
+```ini
+hirestimer = false
+extended = true
+alpha = false
+cachesprites = false
+drawmanabar = false
+
+# Optional local login redirect. This avoids editing the client executable.
+loginHost = 127.0.0.1
+loginPort = 7175
+redirectConnections = true
+```
+
+`loginHost` accepts `localhost` or an IPv4 address. When enabled, the DLL redirects outbound IPv4 `connect()` calls to the configured host and, if `loginPort` is set, to the configured port.
