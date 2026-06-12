@@ -267,7 +267,7 @@ typedef int (WSAAPI *_WSAConnect)(SOCKET s, const sockaddr* name, int namelen, L
 static _Connect OriginalConnect;
 static _WSAConnect OriginalWSAConnect;
 static DWORD network_redirect_ipv4;
-static bool network_redirect_login_connected;
+static const unsigned short default_tibia_login_port = 7171;
 
 static unsigned short HostToNetworkPort(unsigned short port)
 {
@@ -321,27 +321,39 @@ static bool ParseRedirectHost(const char* host, DWORD* address)
 	return true;
 }
 
+static bool ShouldOverrideLoginPort(unsigned short originalPort)
+{
+	if(network_redirect_login_port == 0)
+		return false;
+
+	// Older executables commonly have 7171 compiled in as their login endpoint.
+	// Keep overriding that port for every login retry; non-blocking connect()
+	// returns WSAEWOULDBLOCK before the login attempt has actually completed.
+	return originalPort == default_tibia_login_port;
+}
+
 static bool BuildRedirectedSockaddr(const sockaddr* name, int namelen, sockaddr_in* redirected, bool* overrideLoginPort)
 {
 	if(!should_redirect_network || network_redirect_ipv4 == 0 || !name || namelen < (int)sizeof(sockaddr_in) || name->sa_family != AF_INET)
 		return false;
 
+	const auto original = reinterpret_cast<const sockaddr_in*>(name);
 	*redirected = *reinterpret_cast<const sockaddr_in*>(name);
-	redirected->sin_addr.s_addr = network_redirect_ipv4;
 
-	*overrideLoginPort = network_redirect_login_port != 0 && !network_redirect_login_connected;
+	const unsigned short originalPort = NetworkToHostPort(redirected->sin_port);
+	*overrideLoginPort = ShouldOverrideLoginPort(originalPort);
 	if(*overrideLoginPort)
 		redirected->sin_port = HostToNetworkPort(network_redirect_login_port);
 
-	return true;
+	const bool overrideHost = original->sin_addr.s_addr != network_redirect_ipv4;
+	if(overrideHost)
+		redirected->sin_addr.s_addr = network_redirect_ipv4;
+
+	return overrideHost || *overrideLoginPort;
 }
 
-static void LogRedirectResult(const char* apiName, const sockaddr_in* original, const sockaddr_in* redirected, bool overrideLoginPort, int result)
+static void LogRedirectResult(const char* apiName, const sockaddr_in* original, const sockaddr_in* redirected, bool overrideLoginPort, int result, int error)
 {
-	const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-	if(overrideLoginPort && (result == 0 || error == WSAEWOULDBLOCK || error == WSAEINPROGRESS))
-		network_redirect_login_connected = true;
-
 	char originalHost[32] = {};
 	char redirectedHost[32] = {};
 	FormatIpv4(original->sin_addr.s_addr, originalHost, sizeof(originalHost));
@@ -366,7 +378,10 @@ static int WSAAPI RedirectConnect(SOCKET s, const sockaddr* name, int namelen)
 	{
 		const sockaddr_in* original = reinterpret_cast<const sockaddr_in*>(name);
 		int result = OriginalConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected));
-		LogRedirectResult("connect", original, &redirected, overrideLoginPort, result);
+		const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+		LogRedirectResult("connect", original, &redirected, overrideLoginPort, result, error);
+		if(result == SOCKET_ERROR)
+			WSASetLastError(error);
 		return result;
 	}
 
@@ -381,7 +396,10 @@ static int WSAAPI RedirectWSAConnect(SOCKET s, const sockaddr* name, int namelen
 	{
 		const sockaddr_in* original = reinterpret_cast<const sockaddr_in*>(name);
 		int result = OriginalWSAConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected), callerData, calleeData, sqos, gqos);
-		LogRedirectResult("WSAConnect", original, &redirected, overrideLoginPort, result);
+		const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+		LogRedirectResult("WSAConnect", original, &redirected, overrideLoginPort, result, error);
+		if(result == SOCKET_ERROR)
+			WSASetLastError(error);
 		return result;
 	}
 
