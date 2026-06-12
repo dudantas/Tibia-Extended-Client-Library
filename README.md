@@ -40,11 +40,22 @@ Useful options:
 .\scripts\build-canary-860-msvc-x86.ps1 -Clean
 ```
 
+The helper also supports named build profiles:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -Profile canary-860
+.\scripts\build-canary-860-msvc-x86.ps1 -Profile client-11 -InstallDir path/to/client-11
+```
+
+For convenience, `scripts/build-client11-msvc-x86.ps1` wraps the `client-11` profile.
+
 The default Canary 8.60 defines are `__INCLUDE_860_VERSION__`, `__CONFIG__`, and `__MAGIC_EFFECTS_U16__`. To override them:
 
 ```powershell
 .\scripts\build-canary-860-msvc-x86.ps1 -Defines __INCLUDE_860_VERSION__,__CONFIG__,__MAGIC_EFFECTS_U16__
 ```
+
+The `client-11` profile targets the CipSoft-like executable with entrypoint `0x38D218` and patches the verified `600000` sprite cap so `.spr` files with 15.11-era sprite counts can load. It does not patch gameplay protocol, render hooks, item remapping, or unverified object/outfit/effect caps.
 
 The legacy `.cmd` script is kept as a wrapper around the PowerShell script for convenience.
 
@@ -53,6 +64,8 @@ The legacy `.cmd` script is kept as a wrapper around the PowerShell script for c
 inludes 8.54 client version target\
 **-D__INCLUDE_860_VERSION__**\
 includes 8.60 client version target\
+**-D__INCLUDE_CLIENT11_VERSION__**\
+includes the experimental client-11 asset-limit target\
 **-D__CONFIG__**\
 allows to customize extended options via config.ini\
 **-D__MAGIC_EFFECTS_U16__**\

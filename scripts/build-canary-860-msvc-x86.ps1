@@ -1,15 +1,13 @@
 [CmdletBinding()]
 param(
+    [ValidateSet("canary-860", "client-11")]
+    [string] $Profile = "canary-860",
     [string] $Root,
     [string] $OutDir,
     [string] $InstallDir,
     [string] $VsDevCmd = $env:VSDEVCMD,
     [string] $HostArch = "x64",
-    [string[]] $Defines = @(
-        "__INCLUDE_860_VERSION__",
-        "__CONFIG__",
-        "__MAGIC_EFFECTS_U16__"
-    ),
+    [string[]] $Defines = @(),
     [switch] $Clean
 )
 
@@ -76,8 +74,26 @@ if (-not $Root) {
 
 $Root = Resolve-FullPath $Root
 
+if ($Defines.Count -eq 0) {
+    switch ($Profile) {
+        "canary-860" {
+            $Defines = @(
+                "__INCLUDE_860_VERSION__",
+                "__CONFIG__",
+                "__MAGIC_EFFECTS_U16__"
+            )
+        }
+        "client-11" {
+            $Defines = @(
+                "__INCLUDE_CLIENT11_VERSION__",
+                "__CONFIG__"
+            )
+        }
+    }
+}
+
 if (-not $OutDir) {
-    $OutDir = Join-Path $Root "build\canary-860"
+    $OutDir = Join-Path $Root "build\$Profile"
 }
 
 $OutDir = Resolve-FullPath $OutDir

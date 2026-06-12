@@ -380,6 +380,18 @@ DWORD HPBarRenderHandle()
 	return (DWORD)&newRenderer;
 }
 
+#ifdef __INCLUDE_CLIENT11_VERSION__
+static void PatchClient11AssetLimits()
+{
+	// Tibia.dat/Spr 15.11 exports can exceed the 600000 sprite cap used by this
+	// client-11 executable. Keep this profile intentionally narrow until more
+	// offsets are verified for object/outfit/effect caps.
+	const DWORD maxSprites = 1000000;
+	OverWrite(client_BaseAddr + 0x1DAB45, maxSprites);
+	OverWrite(client_BaseAddr + 0x1DAB52, maxSprites);
+}
+#endif
+
 static HRESULT WINAPI Init( bool extended, bool transparent)
 {
 	DWORD dwOldProtect, dwNewProtect;
@@ -397,6 +409,8 @@ static HRESULT WINAPI Init( bool extended, bool transparent)
 		client_Version = 860;
 	else if(entryPoint == 0x15D02B)
 		client_Version = 854;
+	else if(entryPoint == 0x38D218)
+		client_Version = 1100;
 	else
 		client_Version = 0;
 
@@ -649,6 +663,16 @@ static HRESULT WINAPI Init( bool extended, bool transparent)
 			}
 
 			VirtualProtect((LPVOID)(client_BaseAddr+0x1000), 0x238000, dwOldProtect, &dwNewProtect); //Restore old sections protection
+		}
+		break;
+		#endif
+
+		#ifdef __INCLUDE_CLIENT11_VERSION__
+		case 1100:
+		{
+			VirtualProtect((LPVOID)(client_BaseAddr+0x1000), 0x450000, PAGE_EXECUTE_READWRITE, &dwOldProtect);
+			PatchClient11AssetLimits();
+			VirtualProtect((LPVOID)(client_BaseAddr+0x1000), 0x450000, dwOldProtect, &dwNewProtect);
 		}
 		break;
 		#endif
