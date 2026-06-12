@@ -102,8 +102,14 @@ redirectConnections = true
 # Per-client diagnostics written beside Tibia.exe.
 debugLog = true
 crashDump = true
+
+# Isolate CipSoft's native crash-report/temp state per client/profile.
+isolateClientState = true
+clientProfile = cipsoft860-extended
 ```
 
 `loginHost` accepts `localhost` or an IPv4 address. When enabled, the DLL redirects outbound IPv4 `connect()` calls to the configured host. If `loginPort` is set, the DLL applies it only to the first successful login connection and keeps later game-world connections on the port returned by the server.
 
-The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory. Crash diagnostics are also per-client: the DLL writes `extended-client-crash-*.dmp` beside `Tibia.exe` when a fatal native exception reaches the DLL handler. This avoids mixing CipSoft's global error report state between multiple local clients.
+The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory. Crash diagnostics are also per-client: the DLL writes `extended-client-crash-*.dmp` beside `Tibia.exe` when a fatal native exception reaches the DLL handler.
+
+`isolateClientState` is enabled by default. It points the process-local `TEMP`/`TMP` values and Win32 temp-file APIs to `.client-state/<clientProfile>/temp` beside the executable. This keeps CipSoft's native "last visit crashed" report state separated between 8.60, client-11, and any other local profiles so opening one client does not consume another client's crash report. Set `clientProfile` explicitly when multiple patched clients share the same folder; otherwise the DLL derives a profile from the detected client version.

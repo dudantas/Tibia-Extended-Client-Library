@@ -13,8 +13,10 @@ extern bool should_draw_manabar;
 extern bool should_redirect_network;
 extern bool should_write_crash_log;
 extern bool should_write_crash_dump;
+extern bool should_isolate_client_state;
 extern char network_redirect_host[256];
 extern unsigned short network_redirect_login_port;
+extern char client_state_profile[128];
 
 bool checkBool(char *buffer)
 {
@@ -46,8 +48,10 @@ void loadConfig()
 	should_redirect_network = false;
 	should_write_crash_log = true;
 	should_write_crash_dump = true;
+	should_isolate_client_state = true;
 	network_redirect_host[0] = '\0';
 	network_redirect_login_port = 0;
+	client_state_profile[0] = '\0';
 
 	FILE* f = fopen("config.ini", "rb");
 	if(!f)
@@ -89,6 +93,13 @@ void loadConfig()
 					should_write_crash_log = checkBool(value);
 				else if(stricmp(key, "crashdump") == 0)
 					should_write_crash_dump = checkBool(value);
+				else if(stricmp(key, "isolateclientstate") == 0 || stricmp(key, "isolatecrashreport") == 0)
+					should_isolate_client_state = checkBool(value);
+				else if(stricmp(key, "clientprofile") == 0 || stricmp(key, "stateprofile") == 0)
+				{
+					strncpy(client_state_profile, value, sizeof(client_state_profile) - 1);
+					client_state_profile[sizeof(client_state_profile) - 1] = '\0';
+				}
 				else if(stricmp(key, "loginhost") == 0 || stricmp(key, "serverhost") == 0)
 				{
 					strncpy(network_redirect_host, value, sizeof(network_redirect_host) - 1);

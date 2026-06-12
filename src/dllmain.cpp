@@ -1,4 +1,5 @@
 #include <winsock2.h>
+#include <ctype.h>
 #include <dbghelp.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -42,8 +43,10 @@ bool should_draw_manabar;
 bool should_redirect_network;
 bool should_write_crash_log = true;
 bool should_write_crash_dump = true;
+bool should_isolate_client_state = true;
 char network_redirect_host[256];
 unsigned short network_redirect_login_port;
+char client_state_profile[128];
 #endif
 
 ExtendedEngine* transEngine;
@@ -70,6 +73,9 @@ BYTE SpriteContextPos;
 BYTE SpriteContextNeg;
 
 static char client_directory[MAX_PATH];
+static char client_state_directory[MAX_PATH];
+static char client_temp_directory[MAX_PATH];
+static char client_state_profile_resolved[128];
 static PVOID client_vectored_exception_handler;
 static LPTOP_LEVEL_EXCEPTION_FILTER previous_unhandled_exception_filter;
 static LONG client_crash_dump_written;
@@ -101,6 +107,21 @@ static void BuildClientPath(char* buffer, size_t bufferSize, const char* fileNam
 	}
 
 	snprintf(buffer, bufferSize, "%s\\%s", client_directory, fileName);
+}
+
+static bool EnsureDirectoryExists(const char* path)
+{
+	if(!path || path[0] == '\0')
+		return false;
+
+	DWORD attributes = GetFileAttributesA(path);
+	if(attributes != INVALID_FILE_ATTRIBUTES)
+		return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+	if(CreateDirectoryA(path, NULL))
+		return true;
+
+	return GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
 static void AppendClientLog(const char* format, ...)
@@ -264,10 +285,158 @@ static void InstallClientDiagnostics()
 #ifdef __CONFIG__
 typedef int (WSAAPI *_Connect)(SOCKET s, const sockaddr* name, int namelen);
 typedef int (WSAAPI *_WSAConnect)(SOCKET s, const sockaddr* name, int namelen, LPWSABUF callerData, LPWSABUF calleeData, LPQOS sqos, LPQOS gqos);
+typedef DWORD (WINAPI *_GetTempPathA)(DWORD nBufferLength, LPSTR lpBuffer);
+typedef UINT (WINAPI *_GetTempFileNameA)(LPCSTR lpPathName, LPCSTR lpPrefixString, UINT uUnique, LPSTR lpTempFileName);
+typedef DWORD (WINAPI *_GetTempPathW)(DWORD nBufferLength, LPWSTR lpBuffer);
+typedef UINT (WINAPI *_GetTempFileNameW)(LPCWSTR lpPathName, LPCWSTR lpPrefixString, UINT uUnique, LPWSTR lpTempFileName);
 static _Connect OriginalConnect;
 static _WSAConnect OriginalWSAConnect;
+static _GetTempPathA OriginalGetTempPathA;
+static _GetTempFileNameA OriginalGetTempFileNameA;
+static _GetTempPathW OriginalGetTempPathW;
+static _GetTempFileNameW OriginalGetTempFileNameW;
 static DWORD network_redirect_ipv4;
 static const unsigned short default_tibia_login_port = 7171;
+
+static void ResolveClientStateProfile(char* buffer, size_t bufferSize)
+{
+	const char* source = client_state_profile[0] != '\0' ? client_state_profile : NULL;
+	char fallback[32] = {};
+	if(!source)
+	{
+		switch(client_Version)
+		{
+			case 860:
+				source = "cipsoft860";
+				break;
+			case 1100:
+				source = "client11";
+				break;
+			default:
+				snprintf(fallback, sizeof(fallback), "client-%lu", client_Version);
+				source = fallback;
+				break;
+		}
+	}
+
+	size_t written = 0;
+	for(size_t i = 0; source[i] != '\0' && written + 1 < bufferSize; i++)
+	{
+		const unsigned char ch = static_cast<unsigned char>(source[i]);
+		if(isalnum(ch) || ch == '-' || ch == '_' || ch == '.')
+			buffer[written++] = static_cast<char>(ch);
+		else
+			buffer[written++] = '_';
+	}
+
+	if(written == 0 && bufferSize > 1)
+	{
+		strncpy(buffer, "client", bufferSize - 1);
+		buffer[bufferSize - 1] = '\0';
+		return;
+	}
+
+	buffer[written] = '\0';
+}
+
+static bool PrepareClientStateDirectories()
+{
+	if(client_directory[0] == '\0')
+		return false;
+
+	ResolveClientStateProfile(client_state_profile_resolved, sizeof(client_state_profile_resolved));
+
+	char rootDirectory[MAX_PATH] = {};
+	snprintf(rootDirectory, sizeof(rootDirectory), "%s\\.client-state", client_directory);
+	if(!EnsureDirectoryExists(rootDirectory))
+		return false;
+
+	snprintf(client_state_directory, sizeof(client_state_directory), "%s\\%s", rootDirectory, client_state_profile_resolved);
+	if(!EnsureDirectoryExists(client_state_directory))
+		return false;
+
+	snprintf(client_temp_directory, sizeof(client_temp_directory), "%s\\temp", client_state_directory);
+	return EnsureDirectoryExists(client_temp_directory);
+}
+
+static bool GetIsolatedTempPath(char* buffer, size_t bufferSize)
+{
+	if(!should_isolate_client_state || client_temp_directory[0] == '\0')
+		return false;
+
+	snprintf(buffer, bufferSize, "%s\\", client_temp_directory);
+	return true;
+}
+
+static DWORD CopyIsolatedTempPath(DWORD nBufferLength, LPSTR lpBuffer)
+{
+	char tempPath[MAX_PATH] = {};
+	if(!GetIsolatedTempPath(tempPath, sizeof(tempPath)))
+		return 0;
+
+	const DWORD length = static_cast<DWORD>(strlen(tempPath));
+	if(!lpBuffer || nBufferLength == 0 || length + 1 > nBufferLength)
+		return length + 1;
+
+	memcpy(lpBuffer, tempPath, length + 1);
+	return length;
+}
+
+static DWORD CopyIsolatedTempPathW(DWORD nBufferLength, LPWSTR lpBuffer)
+{
+	char tempPath[MAX_PATH] = {};
+	if(!GetIsolatedTempPath(tempPath, sizeof(tempPath)))
+		return 0;
+
+	wchar_t wideTempPath[MAX_PATH] = {};
+	const int converted = MultiByteToWideChar(CP_ACP, 0, tempPath, -1, wideTempPath, MAX_PATH);
+	if(converted <= 0)
+		return 0;
+
+	const DWORD length = static_cast<DWORD>(converted - 1);
+	if(!lpBuffer || nBufferLength == 0 || length + 1 > nBufferLength)
+		return length + 1;
+
+	memcpy(lpBuffer, wideTempPath, (length + 1) * sizeof(wchar_t));
+	return length;
+}
+
+static DWORD WINAPI RedirectGetTempPathA(DWORD nBufferLength, LPSTR lpBuffer)
+{
+	DWORD result = CopyIsolatedTempPath(nBufferLength, lpBuffer);
+	if(result != 0)
+		return result;
+
+	return OriginalGetTempPathA ? OriginalGetTempPathA(nBufferLength, lpBuffer) : 0;
+}
+
+static UINT WINAPI RedirectGetTempFileNameA(LPCSTR lpPathName, LPCSTR lpPrefixString, UINT uUnique, LPSTR lpTempFileName)
+{
+	char tempPath[MAX_PATH] = {};
+	if(GetIsolatedTempPath(tempPath, sizeof(tempPath)) && OriginalGetTempFileNameA)
+		return OriginalGetTempFileNameA(tempPath, lpPrefixString, uUnique, lpTempFileName);
+
+	return OriginalGetTempFileNameA ? OriginalGetTempFileNameA(lpPathName, lpPrefixString, uUnique, lpTempFileName) : 0;
+}
+
+static DWORD WINAPI RedirectGetTempPathW(DWORD nBufferLength, LPWSTR lpBuffer)
+{
+	DWORD result = CopyIsolatedTempPathW(nBufferLength, lpBuffer);
+	if(result != 0)
+		return result;
+
+	return OriginalGetTempPathW ? OriginalGetTempPathW(nBufferLength, lpBuffer) : 0;
+}
+
+static UINT WINAPI RedirectGetTempFileNameW(LPCWSTR lpPathName, LPCWSTR lpPrefixString, UINT uUnique, LPWSTR lpTempFileName)
+{
+	wchar_t tempPath[MAX_PATH] = {};
+	const DWORD tempPathLength = CopyIsolatedTempPathW(MAX_PATH, tempPath);
+	if(tempPathLength != 0 && tempPathLength < MAX_PATH && tempPath[0] != L'\0' && OriginalGetTempFileNameW)
+		return OriginalGetTempFileNameW(tempPath, lpPrefixString, uUnique, lpTempFileName);
+
+	return OriginalGetTempFileNameW ? OriginalGetTempFileNameW(lpPathName, lpPrefixString, uUnique, lpTempFileName) : 0;
+}
 
 static unsigned short HostToNetworkPort(unsigned short port)
 {
@@ -516,6 +685,58 @@ static bool HookNetworkFunction(const char* moduleName, const char* functionName
 	}
 
 	return InstallInlineHook(moduleName, functionName, replacement, original);
+}
+
+static bool HookKernelFunction(const char* functionName, void* replacement, void** original)
+{
+	if(HookImportedFunction("kernel32.dll", functionName, replacement, original))
+	{
+		AppendClientLog("import hook enabled module=kernel32.dll function=%s", functionName);
+		return true;
+	}
+
+	if(HookImportedFunction("KERNEL32.dll", functionName, replacement, original))
+	{
+		AppendClientLog("import hook enabled module=KERNEL32.dll function=%s", functionName);
+		return true;
+	}
+
+	return InstallInlineHook("kernel32.dll", functionName, replacement, original);
+}
+
+static void PatchClientStateIsolation()
+{
+	if(!should_isolate_client_state)
+		return;
+
+	if(!PrepareClientStateDirectories())
+	{
+		AppendClientLog("client state isolation failed to prepare directory clientDir=%s", client_directory[0] ? client_directory : ".");
+		return;
+	}
+
+	SetEnvironmentVariableA("TEMP", client_temp_directory);
+	SetEnvironmentVariableA("TMP", client_temp_directory);
+
+	bool hooked = false;
+	if(HookKernelFunction("GetTempPathA", reinterpret_cast<void*>(&RedirectGetTempPathA), reinterpret_cast<void**>(&OriginalGetTempPathA)))
+		hooked = true;
+
+	if(HookKernelFunction("GetTempFileNameA", reinterpret_cast<void*>(&RedirectGetTempFileNameA), reinterpret_cast<void**>(&OriginalGetTempFileNameA)))
+		hooked = true;
+
+	if(HookKernelFunction("GetTempPathW", reinterpret_cast<void*>(&RedirectGetTempPathW), reinterpret_cast<void**>(&OriginalGetTempPathW)))
+		hooked = true;
+
+	if(HookKernelFunction("GetTempFileNameW", reinterpret_cast<void*>(&RedirectGetTempFileNameW), reinterpret_cast<void**>(&OriginalGetTempFileNameW)))
+		hooked = true;
+
+	AppendClientLog(
+		"client state isolation enabled profile=%s stateDir=%s tempDir=%s hooks=%s",
+		client_state_profile_resolved,
+		client_state_directory,
+		client_temp_directory,
+		hooked ? "true" : "false");
 }
 
 static void PatchNetworkRedirect()
@@ -922,6 +1143,7 @@ static HRESULT WINAPI Init( bool extended, bool transparent)
 		client_Version = 0;
 
 	#ifdef __CONFIG__
+	PatchClientStateIsolation();
 	PatchNetworkRedirect();
 	#endif
 
@@ -1210,8 +1432,6 @@ static int InitMain()
 	}
 
 	#ifdef __CONFIG__
-	loadConfig();
-
 	HRESULT result = Init(should_use_extended, should_use_alpha);
 	#else
 	HRESULT result = Init(
@@ -1264,6 +1484,9 @@ extern "C"
 		{
 			case DLL_PROCESS_ATTACH:
 				InitClientDirectory();
+				#ifdef __CONFIG__
+				loadConfig();
+				#endif
 				InstallClientDiagnostics();
 				return InitMain();
 
