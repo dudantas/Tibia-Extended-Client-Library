@@ -98,8 +98,12 @@ drawmanabar = false
 loginHost = 127.0.0.1
 loginPort = 7175
 redirectConnections = true
+
+# Per-client diagnostics written beside Tibia.exe.
+debugLog = true
+crashDump = true
 ```
 
 `loginHost` accepts `localhost` or an IPv4 address. When enabled, the DLL redirects outbound IPv4 `connect()` calls to the configured host. If `loginPort` is set, the DLL applies it only to the first successful login connection and keeps later game-world connections on the port returned by the server.
 
-The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory.
+The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory. Crash diagnostics are also per-client: the DLL writes `extended-client-crash-*.dmp` beside `Tibia.exe` when a fatal native exception reaches the DLL handler. This avoids mixing CipSoft's global error report state between multiple local clients.

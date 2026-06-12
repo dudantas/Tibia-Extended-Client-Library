@@ -1,5 +1,9 @@
 #include <winsock2.h>
+#include <dbghelp.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include "config.h"
 #include "extdx9.h"
 #include "extogl.h"
@@ -36,6 +40,8 @@ bool should_use_alpha;
 bool should_use_cached_sprites;
 bool should_draw_manabar;
 bool should_redirect_network;
+bool should_write_crash_log = true;
+bool should_write_crash_dump = true;
 char network_redirect_host[256];
 unsigned short network_redirect_login_port;
 #endif
@@ -63,9 +69,203 @@ DWORD SpriteContext;
 BYTE SpriteContextPos;
 BYTE SpriteContextNeg;
 
+static char client_directory[MAX_PATH];
+static PVOID client_vectored_exception_handler;
+static LPTOP_LEVEL_EXCEPTION_FILTER previous_unhandled_exception_filter;
+static LONG client_crash_dump_written;
+
+static void InitClientDirectory()
+{
+	char executablePath[MAX_PATH] = {};
+	if(!GetModuleFileName(NULL, executablePath, MAX_PATH))
+		return;
+
+	char* lastSlash = strrchr(executablePath, '\\');
+	if(!lastSlash)
+	{
+		client_directory[0] = '\0';
+		return;
+	}
+
+	*lastSlash = '\0';
+	strncpy(client_directory, executablePath, sizeof(client_directory) - 1);
+	client_directory[sizeof(client_directory) - 1] = '\0';
+}
+
+static void BuildClientPath(char* buffer, size_t bufferSize, const char* fileName)
+{
+	if(client_directory[0] == '\0')
+	{
+		snprintf(buffer, bufferSize, "%s", fileName);
+		return;
+	}
+
+	snprintf(buffer, bufferSize, "%s\\%s", client_directory, fileName);
+}
+
+static void AppendClientLog(const char* format, ...)
+{
+	#ifdef __CONFIG__
+	if(!should_write_crash_log)
+		return;
+	#endif
+
+	char logPath[MAX_PATH] = {};
+	BuildClientPath(logPath, sizeof(logPath), "extended-client.log");
+
+	FILE* file = fopen(logPath, "ab");
+	if(!file)
+		return;
+
+	time_t now = time(NULL);
+	tm localTime = {};
+	localtime_s(&localTime, &now);
+	fprintf(
+		file,
+		"[%04d-%02d-%02d %02d:%02d:%02d] ",
+		localTime.tm_year + 1900,
+		localTime.tm_mon + 1,
+		localTime.tm_mday,
+		localTime.tm_hour,
+		localTime.tm_min,
+		localTime.tm_sec);
+
+	va_list args;
+	va_start(args, format);
+	vfprintf(file, format, args);
+	va_end(args);
+	fprintf(file, "\r\n");
+	fclose(file);
+}
+
+static void BuildTimestampedClientPath(char* buffer, size_t bufferSize, const char* prefix, const char* extension)
+{
+	time_t now = time(NULL);
+	tm localTime = {};
+	localtime_s(&localTime, &now);
+
+	char fileName[MAX_PATH] = {};
+	snprintf(
+		fileName,
+		sizeof(fileName),
+		"%s-%04d%02d%02d-%02d%02d%02d%s",
+		prefix,
+		localTime.tm_year + 1900,
+		localTime.tm_mon + 1,
+		localTime.tm_mday,
+		localTime.tm_hour,
+		localTime.tm_min,
+		localTime.tm_sec,
+		extension);
+	BuildClientPath(buffer, bufferSize, fileName);
+}
+
+static void WriteClientCrashDump(EXCEPTION_POINTERS* exceptionInfo)
+{
+	#ifdef __CONFIG__
+	if(!should_write_crash_dump)
+		return;
+	#endif
+
+	if(InterlockedCompareExchange(&client_crash_dump_written, 1, 0) != 0)
+		return;
+
+	char dumpPath[MAX_PATH] = {};
+	BuildTimestampedClientPath(dumpPath, sizeof(dumpPath), "extended-client-crash", ".dmp");
+
+	HANDLE file = CreateFileA(dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if(file == INVALID_HANDLE_VALUE)
+	{
+		AppendClientLog("crash dump failed path=%s error=%lu", dumpPath, GetLastError());
+		return;
+	}
+
+	MINIDUMP_EXCEPTION_INFORMATION dumpInfo = {};
+	dumpInfo.ThreadId = GetCurrentThreadId();
+	dumpInfo.ExceptionPointers = exceptionInfo;
+	dumpInfo.ClientPointers = FALSE;
+
+	const BOOL written = MiniDumpWriteDump(
+		GetCurrentProcess(),
+		GetCurrentProcessId(),
+		file,
+		MiniDumpNormal,
+		exceptionInfo ? &dumpInfo : NULL,
+		NULL,
+		NULL);
+	CloseHandle(file);
+
+	if(written)
+		AppendClientLog("crash dump written path=%s", dumpPath);
+	else
+		AppendClientLog("crash dump write failed path=%s error=%lu", dumpPath, GetLastError());
+}
+
+static bool IsFatalClientException(DWORD code)
+{
+	switch(code)
+	{
+		case EXCEPTION_ACCESS_VIOLATION:
+		case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+		case EXCEPTION_DATATYPE_MISALIGNMENT:
+		case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+		case EXCEPTION_ILLEGAL_INSTRUCTION:
+		case EXCEPTION_INT_DIVIDE_BY_ZERO:
+		case EXCEPTION_PRIV_INSTRUCTION:
+		case EXCEPTION_STACK_OVERFLOW:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static LONG WINAPI ClientVectoredExceptionHandler(EXCEPTION_POINTERS* exceptionInfo)
+{
+	if(exceptionInfo && exceptionInfo->ExceptionRecord && IsFatalClientException(exceptionInfo->ExceptionRecord->ExceptionCode))
+	{
+		AppendClientLog(
+			"fatal exception first-chance code=0x%08lX address=0x%p",
+			exceptionInfo->ExceptionRecord->ExceptionCode,
+			exceptionInfo->ExceptionRecord->ExceptionAddress);
+		WriteClientCrashDump(exceptionInfo);
+	}
+
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG WINAPI ClientUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo)
+{
+	if(exceptionInfo && exceptionInfo->ExceptionRecord)
+	{
+		AppendClientLog(
+			"unhandled exception code=0x%08lX address=0x%p",
+			exceptionInfo->ExceptionRecord->ExceptionCode,
+			exceptionInfo->ExceptionRecord->ExceptionAddress);
+		WriteClientCrashDump(exceptionInfo);
+	}
+
+	if(previous_unhandled_exception_filter)
+		return previous_unhandled_exception_filter(exceptionInfo);
+
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void InstallClientDiagnostics()
+{
+	if(!client_vectored_exception_handler)
+		client_vectored_exception_handler = AddVectoredExceptionHandler(1, ClientVectoredExceptionHandler);
+
+	if(!previous_unhandled_exception_filter)
+		previous_unhandled_exception_filter = SetUnhandledExceptionFilter(ClientUnhandledExceptionFilter);
+
+	AppendClientLog("ddraw loaded clientDir=%s", client_directory[0] ? client_directory : ".");
+}
+
 #ifdef __CONFIG__
 typedef int (WSAAPI *_Connect)(SOCKET s, const sockaddr* name, int namelen);
+typedef int (WSAAPI *_WSAConnect)(SOCKET s, const sockaddr* name, int namelen, LPWSABUF callerData, LPWSABUF calleeData, LPQOS sqos, LPQOS gqos);
 static _Connect OriginalConnect;
+static _WSAConnect OriginalWSAConnect;
 static DWORD network_redirect_ipv4;
 static bool network_redirect_login_connected;
 
@@ -87,16 +287,12 @@ static void FormatIpv4(DWORD address, char* buffer, size_t bufferSize)
 
 static void AppendNetworkLog(const char* format, ...)
 {
-	FILE* file = fopen("extended-client.log", "ab");
-	if(!file)
-		return;
-
+	char buffer[1024] = {};
 	va_list args;
 	va_start(args, format);
-	vfprintf(file, format, args);
+	vsnprintf(buffer, sizeof(buffer), format, args);
 	va_end(args);
-	fprintf(file, "\r\n");
-	fclose(file);
+	AppendClientLog("%s", buffer);
 }
 
 static bool ParseRedirectHost(const char* host, DWORD* address)
@@ -125,40 +321,71 @@ static bool ParseRedirectHost(const char* host, DWORD* address)
 	return true;
 }
 
+static bool BuildRedirectedSockaddr(const sockaddr* name, int namelen, sockaddr_in* redirected, bool* overrideLoginPort)
+{
+	if(!should_redirect_network || network_redirect_ipv4 == 0 || !name || namelen < (int)sizeof(sockaddr_in) || name->sa_family != AF_INET)
+		return false;
+
+	*redirected = *reinterpret_cast<const sockaddr_in*>(name);
+	redirected->sin_addr.s_addr = network_redirect_ipv4;
+
+	*overrideLoginPort = network_redirect_login_port != 0 && !network_redirect_login_connected;
+	if(*overrideLoginPort)
+		redirected->sin_port = HostToNetworkPort(network_redirect_login_port);
+
+	return true;
+}
+
+static void LogRedirectResult(const char* apiName, const sockaddr_in* original, const sockaddr_in* redirected, bool overrideLoginPort, int result)
+{
+	const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+	if(overrideLoginPort && (result == 0 || error == WSAEWOULDBLOCK || error == WSAEINPROGRESS))
+		network_redirect_login_connected = true;
+
+	char originalHost[32] = {};
+	char redirectedHost[32] = {};
+	FormatIpv4(original->sin_addr.s_addr, originalHost, sizeof(originalHost));
+	FormatIpv4(redirected->sin_addr.s_addr, redirectedHost, sizeof(redirectedHost));
+	AppendNetworkLog(
+		"%s original=%s:%u redirected=%s:%u loginPortOverride=%s result=%d error=%d",
+		apiName,
+		originalHost,
+		NetworkToHostPort(original->sin_port),
+		redirectedHost,
+		NetworkToHostPort(redirected->sin_port),
+		overrideLoginPort ? "true" : "false",
+		result,
+		error);
+}
+
 static int WSAAPI RedirectConnect(SOCKET s, const sockaddr* name, int namelen)
 {
-	if(should_redirect_network && network_redirect_ipv4 != 0 && name && namelen >= (int)sizeof(sockaddr_in) && name->sa_family == AF_INET)
+	sockaddr_in redirected = {};
+	bool overrideLoginPort = false;
+	if(BuildRedirectedSockaddr(name, namelen, &redirected, &overrideLoginPort))
 	{
 		const sockaddr_in* original = reinterpret_cast<const sockaddr_in*>(name);
-		sockaddr_in redirected = *reinterpret_cast<const sockaddr_in*>(name);
-		redirected.sin_addr.s_addr = network_redirect_ipv4;
-
-		const bool overrideLoginPort = network_redirect_login_port != 0 && !network_redirect_login_connected;
-		if(overrideLoginPort)
-			redirected.sin_port = HostToNetworkPort(network_redirect_login_port);
-
 		int result = OriginalConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected));
-		const int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-		if(overrideLoginPort && (result == 0 || error == WSAEWOULDBLOCK || error == WSAEINPROGRESS))
-			network_redirect_login_connected = true;
-
-		char originalHost[32] = {};
-		char redirectedHost[32] = {};
-		FormatIpv4(original->sin_addr.s_addr, originalHost, sizeof(originalHost));
-		FormatIpv4(redirected.sin_addr.s_addr, redirectedHost, sizeof(redirectedHost));
-		AppendNetworkLog(
-			"connect original=%s:%u redirected=%s:%u loginPortOverride=%s result=%d error=%d",
-			originalHost,
-			NetworkToHostPort(original->sin_port),
-			redirectedHost,
-			NetworkToHostPort(redirected.sin_port),
-			overrideLoginPort ? "true" : "false",
-			result,
-			error);
+		LogRedirectResult("connect", original, &redirected, overrideLoginPort, result);
 		return result;
 	}
 
 	return OriginalConnect(s, name, namelen);
+}
+
+static int WSAAPI RedirectWSAConnect(SOCKET s, const sockaddr* name, int namelen, LPWSABUF callerData, LPWSABUF calleeData, LPQOS sqos, LPQOS gqos)
+{
+	sockaddr_in redirected = {};
+	bool overrideLoginPort = false;
+	if(BuildRedirectedSockaddr(name, namelen, &redirected, &overrideLoginPort))
+	{
+		const sockaddr_in* original = reinterpret_cast<const sockaddr_in*>(name);
+		int result = OriginalWSAConnect(s, reinterpret_cast<const sockaddr*>(&redirected), sizeof(redirected), callerData, calleeData, sqos, gqos);
+		LogRedirectResult("WSAConnect", original, &redirected, overrideLoginPort, result);
+		return result;
+	}
+
+	return OriginalWSAConnect(s, name, namelen, callerData, calleeData, sqos, gqos);
 }
 
 static bool HookImportedFunction(const char* moduleName, const char* functionName, void* replacement, void** original)
@@ -212,6 +439,67 @@ static bool HookImportedFunction(const char* moduleName, const char* functionNam
 	return false;
 }
 
+static bool InstallInlineHook(const char* moduleName, const char* functionName, void* replacement, void** original)
+{
+	HMODULE module = GetModuleHandleA(moduleName);
+	if(!module)
+		module = LoadLibraryA(moduleName);
+
+	if(!module)
+	{
+		AppendNetworkLog("inline hook failed module=%s function=%s error=%lu", moduleName, functionName, GetLastError());
+		return false;
+	}
+
+	BYTE* target = reinterpret_cast<BYTE*>(GetProcAddress(module, functionName));
+	if(!target)
+	{
+		AppendNetworkLog("inline hook missing export module=%s function=%s error=%lu", moduleName, functionName, GetLastError());
+		return false;
+	}
+
+	BYTE* trampoline = reinterpret_cast<BYTE*>(VirtualAlloc(NULL, 10, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+	if(!trampoline)
+	{
+		AppendNetworkLog("inline hook trampoline alloc failed module=%s function=%s error=%lu", moduleName, functionName, GetLastError());
+		return false;
+	}
+
+	memcpy(trampoline, target, 5);
+	trampoline[5] = 0xE9;
+	*reinterpret_cast<DWORD*>(trampoline + 6) = static_cast<DWORD>((target + 5) - (trampoline + 10));
+
+	DWORD oldProtect = 0;
+	DWORD newProtect = 0;
+	if(!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &oldProtect))
+	{
+		VirtualFree(trampoline, 0, MEM_RELEASE);
+		AppendNetworkLog("inline hook protect failed module=%s function=%s error=%lu", moduleName, functionName, GetLastError());
+		return false;
+	}
+
+	target[0] = 0xE9;
+	*reinterpret_cast<DWORD*>(target + 1) = static_cast<DWORD>(reinterpret_cast<BYTE*>(replacement) - target - 5);
+	VirtualProtect(target, 5, oldProtect, &newProtect);
+	FlushInstructionCache(GetCurrentProcess(), target, 5);
+	FlushInstructionCache(GetCurrentProcess(), trampoline, 10);
+
+	*original = trampoline;
+	AppendNetworkLog("inline hook enabled module=%s function=%s target=0x%p trampoline=0x%p", moduleName, functionName, target, trampoline);
+	return true;
+}
+
+static bool HookNetworkFunction(const char* moduleName, const char* functionName, void* replacement, void** original)
+{
+	if(HookImportedFunction(moduleName, functionName, replacement, original))
+	{
+		AppendNetworkLog("import hook enabled module=%s function=%s", moduleName, functionName);
+		return true;
+	}
+
+	return InstallInlineHook(moduleName, functionName, replacement, original);
+}
+
 static void PatchNetworkRedirect()
 {
 	if(!should_redirect_network || network_redirect_host[0] == '\0')
@@ -223,8 +511,17 @@ static void PatchNetworkRedirect()
 		return;
 	}
 
-	if(HookImportedFunction("ws2_32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)) ||
-		HookImportedFunction("wsock32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)))
+	bool hooked = false;
+	if(HookNetworkFunction("ws2_32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)))
+		hooked = true;
+
+	if(HookNetworkFunction("ws2_32.dll", "WSAConnect", reinterpret_cast<void*>(&RedirectWSAConnect), reinterpret_cast<void**>(&OriginalWSAConnect)))
+		hooked = true;
+
+	if(!OriginalConnect && HookNetworkFunction("wsock32.dll", "connect", reinterpret_cast<void*>(&RedirectConnect), reinterpret_cast<void**>(&OriginalConnect)))
+		hooked = true;
+
+	if(hooked)
 	{
 		char redirectHost[32] = {};
 		FormatIpv4(network_redirect_ipv4, redirectHost, sizeof(redirectHost));
@@ -232,7 +529,7 @@ static void PatchNetworkRedirect()
 	}
 	else
 	{
-		AppendNetworkLog("network redirect failed to hook connect import");
+		AppendNetworkLog("network redirect failed to hook connect/WSAConnect");
 	}
 }
 #endif
@@ -948,6 +1245,8 @@ extern "C"
 		switch(dwReason)
 		{
 			case DLL_PROCESS_ATTACH:
+				InitClientDirectory();
+				InstallClientDiagnostics();
 				return InitMain();
 
 			case DLL_THREAD_ATTACH:

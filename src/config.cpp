@@ -11,6 +11,8 @@ extern bool should_use_alpha;
 extern bool should_use_cached_sprites;
 extern bool should_draw_manabar;
 extern bool should_redirect_network;
+extern bool should_write_crash_log;
+extern bool should_write_crash_dump;
 extern char network_redirect_host[256];
 extern unsigned short network_redirect_login_port;
 
@@ -42,6 +44,8 @@ void loadConfig()
 	should_use_cached_sprites = true;
 	should_draw_manabar = true;
 	should_redirect_network = false;
+	should_write_crash_log = true;
+	should_write_crash_dump = true;
 	network_redirect_host[0] = '\0';
 	network_redirect_login_port = 0;
 
@@ -81,6 +85,10 @@ void loadConfig()
 					should_redirect_network = checkBool(value);
 					redirectConfigured = true;
 				}
+				else if(stricmp(key, "crashlog") == 0 || stricmp(key, "debuglog") == 0)
+					should_write_crash_log = checkBool(value);
+				else if(stricmp(key, "crashdump") == 0)
+					should_write_crash_dump = checkBool(value);
 				else if(stricmp(key, "loginhost") == 0 || stricmp(key, "serverhost") == 0)
 				{
 					strncpy(network_redirect_host, value, sizeof(network_redirect_host) - 1);
