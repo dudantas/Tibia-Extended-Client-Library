@@ -392,6 +392,19 @@ static void PatchClient11AssetLimits()
 }
 #endif
 
+static DWORD GetClientEntryPoint()
+{
+	const auto dosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(client_BaseAddr);
+	if(dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+		return 0;
+
+	const auto ntHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(client_BaseAddr + dosHeader->e_lfanew);
+	if(ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+		return 0;
+
+	return ntHeaders->OptionalHeader.AddressOfEntryPoint;
+}
+
 static HRESULT WINAPI Init( bool extended, bool transparent)
 {
 	DWORD dwOldProtect, dwNewProtect;
@@ -404,7 +417,7 @@ static HRESULT WINAPI Init( bool extended, bool transparent)
 		return result;
 	}
 
-	DWORD entryPoint = *(DWORD*)(client_BaseAddr+0x148); //entrypoint should be unique for every version
+	DWORD entryPoint = GetClientEntryPoint(); //entrypoint should be unique for every version
 	if(entryPoint == 0x1625EB)
 		client_Version = 860;
 	else if(entryPoint == 0x15D02B)
