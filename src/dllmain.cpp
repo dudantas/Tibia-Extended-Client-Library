@@ -13,7 +13,7 @@ struct Render_NEW
 	DWORD padds1[5];
 	void (__stdcall *DrawRectangle) (DWORD nSurface, DWORD X, DWORD Y, DWORD W, DWORD H, DWORD nRed, DWORD nGreen, DWORD nBlue);
 	DWORD padds2[4];
-	void  __stdcall (*LoadSprite) (int surface, int x, int y, int w, int h, void* data);
+	void (__stdcall *LoadSprite) (int surface, int x, int y, int w, int h, void* data);
 };
 
 Render_NEW *newRenderer;
