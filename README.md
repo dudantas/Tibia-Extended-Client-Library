@@ -18,6 +18,36 @@ Make sure your target filename is ddraw.dll\
 Link opengl32 to your project.\
 Always compile as release 32bit.
 
+## Canary 8.60 build helper
+
+The repository includes a PowerShell build helper for the Canary-compatible 8.60 extended client DLL. Run it from the repository root:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1
+```
+
+By default it writes `ddraw.dll` to `build/canary-860`. It uses the current Visual Studio Developer environment when available; otherwise it discovers `VsDevCmd.bat` with `vswhere`. If discovery is not possible, pass the path explicitly:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -VsDevCmd "<path-to-vsdevcmd.bat>"
+```
+
+Useful options:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -OutDir artifacts/canary-860
+.\scripts\build-canary-860-msvc-x86.ps1 -InstallDir path/to/client
+.\scripts\build-canary-860-msvc-x86.ps1 -Clean
+```
+
+The default Canary 8.60 defines are `__INCLUDE_860_VERSION__`, `__CONFIG__`, and `__MAGIC_EFFECTS_U16__`. To override them:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -Defines __INCLUDE_860_VERSION__,__CONFIG__,__MAGIC_EFFECTS_U16__
+```
+
+The legacy `.cmd` script is kept as a wrapper around the PowerShell script for convenience.
+
 ### Preprocesor Defines
 **-D__INCLUDE_854_VERSION__**\
 inludes 8.54 client version target\
