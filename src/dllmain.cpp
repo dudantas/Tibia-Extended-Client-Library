@@ -75,6 +75,7 @@ BYTE SpriteContextNeg;
 static char client_directory[MAX_PATH];
 static char client_state_directory[MAX_PATH];
 static char client_temp_directory[MAX_PATH];
+static char client_roaming_directory[MAX_PATH];
 static char client_state_profile_resolved[128];
 static PVOID client_vectored_exception_handler;
 static LPTOP_LEVEL_EXCEPTION_FILTER previous_unhandled_exception_filter;
@@ -289,14 +290,18 @@ typedef DWORD (WINAPI *_GetTempPathA)(DWORD nBufferLength, LPSTR lpBuffer);
 typedef UINT (WINAPI *_GetTempFileNameA)(LPCSTR lpPathName, LPCSTR lpPrefixString, UINT uUnique, LPSTR lpTempFileName);
 typedef DWORD (WINAPI *_GetTempPathW)(DWORD nBufferLength, LPWSTR lpBuffer);
 typedef UINT (WINAPI *_GetTempFileNameW)(LPCWSTR lpPathName, LPCWSTR lpPrefixString, UINT uUnique, LPWSTR lpTempFileName);
+typedef BOOL (WINAPI *_SHGetSpecialFolderPathA)(HWND hwnd, LPSTR pszPath, int csidl, BOOL fCreate);
 static _Connect OriginalConnect;
 static _WSAConnect OriginalWSAConnect;
 static _GetTempPathA OriginalGetTempPathA;
 static _GetTempFileNameA OriginalGetTempFileNameA;
 static _GetTempPathW OriginalGetTempPathW;
 static _GetTempFileNameW OriginalGetTempFileNameW;
+static _SHGetSpecialFolderPathA OriginalSHGetSpecialFolderPathA;
 static DWORD network_redirect_ipv4;
 static const unsigned short default_tibia_login_port = 7171;
+static const int csidl_appdata = 0x001A;
+static const int csidl_local_appdata = 0x001C;
 
 static void ResolveClientStateProfile(char* buffer, size_t bufferSize)
 {
@@ -356,7 +361,11 @@ static bool PrepareClientStateDirectories()
 		return false;
 
 	snprintf(client_temp_directory, sizeof(client_temp_directory), "%s\\temp", client_state_directory);
-	return EnsureDirectoryExists(client_temp_directory);
+	if(!EnsureDirectoryExists(client_temp_directory))
+		return false;
+
+	snprintf(client_roaming_directory, sizeof(client_roaming_directory), "%s\\roaming", client_state_directory);
+	return EnsureDirectoryExists(client_roaming_directory);
 }
 
 static bool GetIsolatedTempPath(char* buffer, size_t bufferSize)
@@ -436,6 +445,26 @@ static UINT WINAPI RedirectGetTempFileNameW(LPCWSTR lpPathName, LPCWSTR lpPrefix
 		return OriginalGetTempFileNameW(tempPath, lpPrefixString, uUnique, lpTempFileName);
 
 	return OriginalGetTempFileNameW ? OriginalGetTempFileNameW(lpPathName, lpPrefixString, uUnique, lpTempFileName) : 0;
+}
+
+static BOOL WINAPI RedirectSHGetSpecialFolderPathA(HWND hwnd, LPSTR pszPath, int csidl, BOOL fCreate)
+{
+	const int baseCsidl = csidl & 0x00FF;
+	if(should_isolate_client_state && client_roaming_directory[0] != '\0' && (baseCsidl == csidl_appdata || baseCsidl == csidl_local_appdata))
+	{
+		if(fCreate && !EnsureDirectoryExists(client_roaming_directory))
+			return FALSE;
+
+		if(!pszPath)
+			return FALSE;
+
+		strncpy(pszPath, client_roaming_directory, MAX_PATH - 1);
+		pszPath[MAX_PATH - 1] = '\0';
+		AppendClientLog("redirect special folder csidl=%d path=%s", csidl, client_roaming_directory);
+		return TRUE;
+	}
+
+	return OriginalSHGetSpecialFolderPathA ? OriginalSHGetSpecialFolderPathA(hwnd, pszPath, csidl, fCreate) : FALSE;
 }
 
 static unsigned short HostToNetworkPort(unsigned short port)
@@ -687,21 +716,31 @@ static bool HookNetworkFunction(const char* moduleName, const char* functionName
 	return InstallInlineHook(moduleName, functionName, replacement, original);
 }
 
+static bool HookSystemFunction(const char* moduleName, const char* alternateModuleName, const char* functionName, void* replacement, void** original)
+{
+	if(HookImportedFunction(moduleName, functionName, replacement, original))
+	{
+		AppendClientLog("import hook enabled module=%s function=%s", moduleName, functionName);
+		return true;
+	}
+
+	if(alternateModuleName && HookImportedFunction(alternateModuleName, functionName, replacement, original))
+	{
+		AppendClientLog("import hook enabled module=%s function=%s", alternateModuleName, functionName);
+		return true;
+	}
+
+	return InstallInlineHook(moduleName, functionName, replacement, original);
+}
+
 static bool HookKernelFunction(const char* functionName, void* replacement, void** original)
 {
-	if(HookImportedFunction("kernel32.dll", functionName, replacement, original))
-	{
-		AppendClientLog("import hook enabled module=kernel32.dll function=%s", functionName);
-		return true;
-	}
+	return HookSystemFunction("kernel32.dll", "KERNEL32.dll", functionName, replacement, original);
+}
 
-	if(HookImportedFunction("KERNEL32.dll", functionName, replacement, original))
-	{
-		AppendClientLog("import hook enabled module=KERNEL32.dll function=%s", functionName);
-		return true;
-	}
-
-	return InstallInlineHook("kernel32.dll", functionName, replacement, original);
+static bool HookShellFunction(const char* functionName, void* replacement, void** original)
+{
+	return HookSystemFunction("shell32.dll", "SHELL32.dll", functionName, replacement, original);
 }
 
 static void PatchClientStateIsolation()
@@ -717,6 +756,8 @@ static void PatchClientStateIsolation()
 
 	SetEnvironmentVariableA("TEMP", client_temp_directory);
 	SetEnvironmentVariableA("TMP", client_temp_directory);
+	SetEnvironmentVariableA("APPDATA", client_roaming_directory);
+	SetEnvironmentVariableA("LOCALAPPDATA", client_roaming_directory);
 
 	bool hooked = false;
 	if(HookKernelFunction("GetTempPathA", reinterpret_cast<void*>(&RedirectGetTempPathA), reinterpret_cast<void**>(&OriginalGetTempPathA)))
@@ -731,11 +772,15 @@ static void PatchClientStateIsolation()
 	if(HookKernelFunction("GetTempFileNameW", reinterpret_cast<void*>(&RedirectGetTempFileNameW), reinterpret_cast<void**>(&OriginalGetTempFileNameW)))
 		hooked = true;
 
+	if(HookShellFunction("SHGetSpecialFolderPathA", reinterpret_cast<void*>(&RedirectSHGetSpecialFolderPathA), reinterpret_cast<void**>(&OriginalSHGetSpecialFolderPathA)))
+		hooked = true;
+
 	AppendClientLog(
-		"client state isolation enabled profile=%s stateDir=%s tempDir=%s hooks=%s",
+		"client state isolation enabled profile=%s stateDir=%s tempDir=%s roamingDir=%s hooks=%s",
 		client_state_profile_resolved,
 		client_state_directory,
 		client_temp_directory,
+		client_roaming_directory,
 		hooked ? "true" : "false");
 }
 
