@@ -681,6 +681,8 @@ static bool InstallInlineHook(const char* moduleName, const char* functionName, 
 		return false;
 	}
 
+	// This inline hook copies a fixed 5-byte prologue. Only use it for known
+	// Win32 API targets whose first 5 bytes are complete, non-relative instructions.
 	memcpy(trampoline, target, 5);
 	trampoline[5] = 0xE9;
 	*reinterpret_cast<DWORD*>(trampoline + 6) = static_cast<DWORD>((target + 5) - (trampoline + 10));
