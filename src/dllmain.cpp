@@ -469,12 +469,12 @@ static BOOL WINAPI RedirectSHGetSpecialFolderPathA(HWND hwnd, LPSTR pszPath, int
 
 static unsigned short HostToNetworkPort(unsigned short port)
 {
-	return (unsigned short)((port << 8) | (port >> 8));
+	return htons(port);
 }
 
 static unsigned short NetworkToHostPort(unsigned short port)
 {
-	return HostToNetworkPort(port);
+	return ntohs(port);
 }
 
 static void FormatIpv4(DWORD address, char* buffer, size_t bufferSize)
@@ -791,7 +791,7 @@ static void PatchNetworkRedirect()
 
 	if(!ParseRedirectHost(network_redirect_host, &network_redirect_ipv4))
 	{
-		MessageBox(NULL, "config.ini loginHost must be an IPv4 address or localhost.", PROJECT_NAME, MB_OK|MB_ICONERROR);
+		MessageBox(NULL, "config.ini loginHost/serverHost must be an IPv4 address or localhost.", PROJECT_NAME, MB_OK|MB_ICONERROR);
 		return;
 	}
 
@@ -813,7 +813,9 @@ static void PatchNetworkRedirect()
 	}
 	else
 	{
+		should_redirect_network = false;
 		AppendNetworkLog("network redirect failed to hook connect/WSAConnect");
+		MessageBox(NULL, "Network redirect is disabled because ddraw.dll could not hook connect/WSAConnect.", PROJECT_NAME, MB_OK|MB_ICONWARNING);
 	}
 }
 #endif

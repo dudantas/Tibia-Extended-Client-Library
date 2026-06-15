@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet("canary-860", "client-11")]
-    [string] $Profile = "canary-860",
+    [Alias("Profile")]
+    [string] $BuildProfile = "canary-860",
     [string] $Root,
     [string] $OutDir,
     [string] $InstallDir,
@@ -75,7 +76,7 @@ if (-not $Root) {
 $Root = Resolve-FullPath $Root
 
 if ($Defines.Count -eq 0) {
-    switch ($Profile) {
+    switch ($BuildProfile) {
         "canary-860" {
             $Defines = @(
                 "__INCLUDE_860_VERSION__",
@@ -93,7 +94,7 @@ if ($Defines.Count -eq 0) {
 }
 
 if (-not $OutDir) {
-    $OutDir = Join-Path $Root "build\$Profile"
+    $OutDir = Join-Path $Root "build\$BuildProfile"
 }
 
 $OutDir = Resolve-FullPath $OutDir
@@ -114,6 +115,8 @@ if (-not $env:VSCMD_VER) {
 }
 
 $defPath = Join-Path $OutDir "ddraw.def"
+$dllPath = Join-Path $OutDir "ddraw.dll"
+$importLibPath = Join-Path $OutDir "ddraw.lib"
 @"
 LIBRARY ddraw
 EXPORTS
@@ -154,8 +157,8 @@ foreach ($define in $Defines) {
 $compilerArgs += $sources
 $compilerArgs += @(
     "/link",
-    "/OUT:$(Join-Path $OutDir "ddraw.dll")",
-    "/IMPLIB:$(Join-Path $OutDir "ddraw.lib")",
+    "/OUT:$dllPath",
+    "/IMPLIB:$importLibPath",
     "/DEF:$defPath",
     "user32.lib",
     "ws2_32.lib",
@@ -175,7 +178,6 @@ finally {
     Pop-Location
 }
 
-$dllPath = Join-Path $OutDir "ddraw.dll"
 if ($InstallDir) {
     if (-not (Test-Path -LiteralPath $InstallDir -PathType Container)) {
         throw "InstallDir does not exist: $InstallDir"

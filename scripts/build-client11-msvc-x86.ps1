@@ -9,7 +9,7 @@ param(
 )
 
 $buildParams = @{
-    Profile = "client-11"
+    BuildProfile = "client-11"
     HostArch = $HostArch
 }
 
