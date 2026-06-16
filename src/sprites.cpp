@@ -1,5 +1,7 @@
 #include "sprites.h"
 
+#include <stdlib.h>
+
 #ifdef __CONFIG__
 extern bool should_use_cached_sprites;
 #endif

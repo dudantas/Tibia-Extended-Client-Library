@@ -18,11 +18,54 @@ Make sure your target filename is ddraw.dll\
 Link opengl32 to your project.\
 Always compile as release 32bit.
 
+## Canary 8.60 build helper
+
+The repository includes a PowerShell build helper for the Canary-compatible 8.60 extended client DLL. Run it from the repository root:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1
+```
+
+By default it writes `ddraw.dll` to `build/canary-860`. It uses the current Visual Studio Developer environment when available; otherwise it discovers `VsDevCmd.bat` with `vswhere`. If discovery is not possible, pass the path explicitly:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -VsDevCmd "<path-to-vsdevcmd.bat>"
+```
+
+Useful options:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -OutDir artifacts/canary-860
+.\scripts\build-canary-860-msvc-x86.ps1 -InstallDir path/to/client
+.\scripts\build-canary-860-msvc-x86.ps1 -Clean
+```
+
+The helper also supports named build profiles:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -Profile canary-860
+.\scripts\build-canary-860-msvc-x86.ps1 -Profile client-11 -InstallDir path/to/client-11
+```
+
+For convenience, `scripts/build-client11-msvc-x86.ps1` wraps the `client-11` profile.
+
+The default Canary 8.60 defines are `__INCLUDE_860_VERSION__`, `__CONFIG__`, and `__MAGIC_EFFECTS_U16__`. To override them:
+
+```powershell
+.\scripts\build-canary-860-msvc-x86.ps1 -Defines __INCLUDE_860_VERSION__,__CONFIG__,__MAGIC_EFFECTS_U16__
+```
+
+The `client-11` profile targets the CipSoft-like executable with entrypoint `0x38D218` and patches the verified `600000` sprite cap so `.spr` files with 15.11-era sprite counts can load. It does not patch gameplay protocol, render hooks, item remapping, or unverified object/outfit/effect caps.
+
+The legacy `.cmd` script is kept as a wrapper around the PowerShell script for convenience.
+
 ### Preprocesor Defines
 **-D__INCLUDE_854_VERSION__**\
 inludes 8.54 client version target\
 **-D__INCLUDE_860_VERSION__**\
 includes 8.60 client version target\
+**-D__INCLUDE_CLIENT11_VERSION__**\
+includes the experimental client-11 asset-limit target\
 **-D__CONFIG__**\
 allows to customize extended options via config.ini\
 **-D__MAGIC_EFFECTS_U16__**\
@@ -39,3 +82,46 @@ use the extended .spr and .dat files(only if not defined **-D__CONFIG__**)\
 use the alpha channel in .spr file(only if not defined **-D__CONFIG__**)\
 **-D__MANABAR__**\
 force the manabar to be visible(only if not defined **-D__CONFIG__**)
+
+## config.ini
+
+When the DLL is built with `__CONFIG__`, it reads `config.ini` from the client directory. Existing options are still supported, and spacing around `=` is optional:
+
+```ini
+hirestimer = false
+extended = true
+alpha = false
+cachesprites = false
+drawmanabar = false
+
+# Optional local login redirect. This avoids editing the client executable.
+loginHost = 127.0.0.1
+loginPort = 7171
+redirectConnections = true
+
+# Per-client diagnostics written beside Tibia.exe.
+debugLog = true
+crashDump = true
+
+# Isolate CipSoft's native crash-report/temp state per client/profile.
+isolateClientState = true
+clientProfile = cipsoft860-extended
+```
+
+`loginHost` accepts `localhost` or an IPv4 address. The redirect is enabled only when `redirectConnections = true`; setting `loginHost` alone no longer turns it on implicitly.
+
+`loginPort` is optional and should point to the login port, not the game-world port. For Canary defaults, use `7171`. If your server uses a custom login port such as `7174`, set `loginPort` to that login port explicitly.
+
+Do **not** point `loginPort` to the game-world port (`7172`, `7175`, or similar). The client will send a login packet to the game socket, the server will parse the wrong protocol contract, and the CipSoft client will usually crash with errors such as `packet size is too small even for one encrypted block`.
+
+The current DLL logic redirects outbound IPv4 `connect()` calls to the configured host. If `loginPort` is set, the DLL rewrites the destination port only when the original client destination port is `7171` (the classic Tibia login endpoint). Game-world connections keep using the port returned by the login server.
+
+For Canary users:
+
+- See the default login/game port configuration in [`opentibiabr/canary/config.lua.dist`](https://github.com/opentibiabr/canary/blob/main/config.lua.dist).
+- See the multiprotocol port behavior in [`opentibiabr/canary/docs/systems/multiprotocol.md`](https://github.com/opentibiabr/canary/blob/main/docs/systems/multiprotocol.md).
+- `loginPort` in this DLL must match Canary's `loginProtocolPort`, not `gameProtocolPort`, `legacy1100GameProtocolPort`, or `legacy860GameProtocolPort`.
+
+The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory. Crash diagnostics are also per-client: the DLL writes `extended-client-crash-*.dmp` beside `Tibia.exe` when a fatal native exception reaches the DLL handler.
+
+`isolateClientState` is enabled by default. It points the process-local `TEMP`/`TMP`, `APPDATA`, and `LOCALAPPDATA` values to `.client-state/<clientProfile>` beside the executable, and redirects CipSoft's special-folder lookup to `.client-state/<clientProfile>/roaming`. This keeps native files such as `Tibia.cfg`, `Automap`, and `Error.txt` separated between 8.60, client-11, and any other local profiles so opening one client does not consume another client's crash report or config. Set `clientProfile` explicitly when multiple patched clients share the same folder; otherwise the DLL derives a profile from the detected client version.
