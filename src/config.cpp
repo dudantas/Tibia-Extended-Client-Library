@@ -57,7 +57,6 @@ void loadConfig()
 	if(!f)
 		return;
 
-	bool redirectConfigured = false;
 	while(!feof(f))
 	{
 		char read_buffer[2048] = {0};
@@ -85,10 +84,7 @@ void loadConfig()
 				else if(stricmp(key, "drawmanabar") == 0)
 					should_draw_manabar = checkBool(value);
 				else if(stricmp(key, "redirectconnections") == 0 || stricmp(key, "redirectlogin") == 0)
-				{
 					should_redirect_network = checkBool(value);
-					redirectConfigured = true;
-				}
 				else if(stricmp(key, "crashlog") == 0 || stricmp(key, "debuglog") == 0)
 					should_write_crash_log = checkBool(value);
 				else if(stricmp(key, "crashdump") == 0)
@@ -117,8 +113,5 @@ void loadConfig()
 
 	if(f)
 		fclose(f);
-
-	if(!redirectConfigured && network_redirect_host[0] != '\0')
-		should_redirect_network = true;
 }
 #endif

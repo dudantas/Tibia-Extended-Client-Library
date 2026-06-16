@@ -96,7 +96,7 @@ drawmanabar = false
 
 # Optional local login redirect. This avoids editing the client executable.
 loginHost = 127.0.0.1
-loginPort = 7175
+loginPort = 7171
 redirectConnections = true
 
 # Per-client diagnostics written beside Tibia.exe.
@@ -108,7 +108,19 @@ isolateClientState = true
 clientProfile = cipsoft860-extended
 ```
 
-`loginHost` accepts `localhost` or an IPv4 address. When enabled, the DLL redirects outbound IPv4 `connect()` calls to the configured host. If `loginPort` is set, the DLL applies it only to the first successful login connection and keeps later game-world connections on the port returned by the server.
+`loginHost` accepts `localhost` or an IPv4 address. The redirect is enabled only when `redirectConnections = true`; setting `loginHost` alone no longer turns it on implicitly.
+
+`loginPort` is optional and should point to the login port, not the game-world port. For Canary defaults, use `7171`. If your server uses a custom login port such as `7174`, set `loginPort` to that login port explicitly.
+
+Do **not** point `loginPort` to the game-world port (`7172`, `7175`, or similar). The client will send a login packet to the game socket, the server will parse the wrong protocol contract, and the CipSoft client will usually crash with errors such as `packet size is too small even for one encrypted block`.
+
+The current DLL logic redirects outbound IPv4 `connect()` calls to the configured host. If `loginPort` is set, the DLL rewrites the destination port only when the original client destination port is `7171` (the classic Tibia login endpoint). Game-world connections keep using the port returned by the login server.
+
+For Canary users:
+
+- See the default login/game port configuration in [`opentibiabr/canary/config.lua.dist`](https://github.com/opentibiabr/canary/blob/main/config.lua.dist).
+- See the multiprotocol port behavior in [`opentibiabr/canary/docs/systems/multiprotocol.md`](https://github.com/opentibiabr/canary/blob/main/docs/systems/multiprotocol.md).
+- `loginPort` in this DLL must match Canary's `loginProtocolPort`, not `gameProtocolPort`, `legacy1100GameProtocolPort`, or `legacy860GameProtocolPort`.
 
 The redirect hook writes basic connection diagnostics to `extended-client.log` in the client directory. Crash diagnostics are also per-client: the DLL writes `extended-client-crash-*.dmp` beside `Tibia.exe` when a fatal native exception reaches the DLL handler.
 
